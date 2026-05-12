@@ -188,29 +188,57 @@ export default function App() {
   });
 
   // Bulk Mode State
-  const [recipients, setRecipients] = useState<Recipient[]>([]);
+  const [rawRecipients, setRawRecipients] = useState<any[]>([]);
   const [bulkFiles, setBulkFiles] = useState<FileWithPreview[]>([]);
   const [isBulkSending, setIsBulkSending] = useState(false);
+  const [useCommonFile, setUseCommonFile] = useState(false);
+  const [bulkStatus, setBulkStatus] = useState<Record<string, { status: Recipient['status'], error?: string }>>({});
+
+  const recipients = useMemo(() => {
+    return rawRecipients
+      .map(row => ({
+        email: (row.email || row.penerima || '').trim(),
+        filename: (row.filename || row.file || '').trim(),
+        status: 'pending' as const
+      }))
+      .filter(r => r.email && (useCommonFile || r.filename));
+  }, [rawRecipients, useCommonFile]);
 
   // Single Mode Dropzone
   const onDropSingle = useCallback((acceptedFiles: File[]) => {
-    setFiles(prev => [...prev, ...acceptedFiles]);
+    const filesWithPreviews = acceptedFiles.map(file => Object.assign(file, {
+      preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined
+    }));
+    setFiles(prev => [...prev, ...filesWithPreviews]);
   }, []);
 
   const { getRootProps: getRootPropsSingle, getInputProps: getInputPropsSingle, isDragActive: isDragActiveSingle } = useDropzone({
     onDrop: onDropSingle,
-    accept: { 'application/pdf': ['.pdf'] },
+    accept: { 
+      'application/pdf': ['.pdf'],
+      'image/jpeg': ['.jpg', '.jpeg'],
+      'image/png': ['.png'],
+      'image/webp': ['.webp']
+    },
     multiple: true
   } as any);
 
   // Bulk Mode Dropzones
   const onDropBulkFiles = useCallback((acceptedFiles: File[]) => {
-    setBulkFiles(prev => [...prev, ...acceptedFiles]);
+    const filesWithPreviews = acceptedFiles.map(file => Object.assign(file, {
+      preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined
+    }));
+    setBulkFiles(prev => [...prev, ...filesWithPreviews]);
   }, []);
 
   const { getRootProps: getRootPropsBulkFiles, getInputProps: getInputPropsBulkFiles, isDragActive: isDragActiveBulkFiles } = useDropzone({
     onDrop: onDropBulkFiles,
-    accept: { 'application/pdf': ['.pdf'] },
+    accept: { 
+      'application/pdf': ['.pdf'],
+      'image/jpeg': ['.jpg', '.jpeg'],
+      'image/png': ['.png'],
+      'image/webp': ['.webp']
+    },
     multiple: true
   } as any);
 
@@ -224,19 +252,11 @@ export default function App() {
       transformHeader: (header) => header.toLowerCase().trim(),
       complete: (results) => {
         const data = results.data as any[];
-        const parsedRecipients: Recipient[] = data
-          .filter(row => (row.email || row.penerima) && (row.filename || row.file))
-          .map(row => ({
-            email: (row.email || row.penerima || '').trim(),
-            filename: (row.filename || row.file || '').trim(),
-            status: 'pending' as const
-          }))
-          .filter(r => r.email && r.filename);
-
-        if (parsedRecipients.length === 0) {
-          alert('Tidak ada data penerima yang valid ditemukan. Pastikan CSV memiliki kolom "email" dan "filename".');
+        if (data.length === 0) {
+          alert('File CSV kosong.');
+          return;
         }
-        setRecipients(parsedRecipients);
+        setRawRecipients(data);
       },
       error: (error) => {
         console.error('CSV Parsing Error:', error);
@@ -248,17 +268,22 @@ export default function App() {
   };
 
   const removeFile = (index: number) => {
+    const file = files[index];
+    if (file.preview) URL.revokeObjectURL(file.preview);
     setFiles(prev => prev.filter((_, i) => i !== index));
   };
 
   const removeBulkFile = (index: number) => {
+    const file = bulkFiles[index];
+    if (file.preview) URL.revokeObjectURL(file.preview);
     setBulkFiles(prev => prev.filter((_, i) => i !== index));
   };
 
   const clearBulk = () => {
     if (window.confirm('Hapus semua data bulk?')) {
-      setRecipients([]);
+      setRawRecipients([]);
       setBulkFiles([]);
+      setBulkStatus({});
     }
   };
 
@@ -315,9 +340,9 @@ export default function App() {
 
     // Hitung ringkasan status saat ini
     const totalCount = recipients.length;
-    const successCount = recipients.filter(r => r.status === 'success').length;
-    const errorCount = recipients.filter(r => r.status === 'error').length;
-    const pendingCount = recipients.filter(r => r.status === 'pending').length;
+    const successCount = recipients.filter(r => bulkStatus[r.email]?.status === 'success').length;
+    const errorCount = recipients.filter(r => bulkStatus[r.email]?.status === 'error').length;
+    const pendingCount = recipients.filter(r => !bulkStatus[r.email] || bulkStatus[r.email].status === 'pending').length;
     const toSend = errorCount + pendingCount;
     
     if (toSend === 0) {
@@ -327,7 +352,7 @@ export default function App() {
 
     // Email Validation for Bulk
     const invalidEmails = recipients
-      .filter(r => r.status !== 'success' && !isValidEmail(r.email))
+      .filter(r => bulkStatus[r.email]?.status !== 'success' && !isValidEmail(r.email))
       .map(r => r.email);
 
     if (invalidEmails.length > 0) {
@@ -355,19 +380,31 @@ export default function App() {
       const recipient = recipients[i];
       
       // Skip if already success
-      if (recipient.status === 'success') continue;
+      if (bulkStatus[recipient.email]?.status === 'success') continue;
 
-      setRecipients(prev => prev.map((r, idx) => idx === i ? { ...r, status: 'sending' } : r));
+      setBulkStatus(prev => ({ ...prev, [recipient.email]: { status: 'sending' } }));
 
-      // Find the matching file (Case-insensitive and handles missing .pdf extension)
-      const matchingFile = bulkFiles.find(f => {
-        const fileName = f.name.toLowerCase();
-        const targetName = recipient.filename.toLowerCase();
-        return fileName === targetName || fileName === `${targetName}.pdf`;
-      });
+      let matchingFiles: File[] = [];
+      if (useCommonFile) {
+        matchingFiles = bulkFiles;
+      } else {
+        const matchingFile = bulkFiles.find(f => {
+          const fileName = f.name.toLowerCase();
+          const targetName = recipient.filename.toLowerCase();
+          // Support various extensions or exact match
+          const baseFileName = fileName.replace(/\.[^/.]+$/, "");
+          const targetBaseName = targetName.replace(/\.[^/.]+$/, "");
+          
+          return fileName === targetName || baseFileName === targetName || baseFileName === targetBaseName;
+        });
+        if (matchingFile) matchingFiles = [matchingFile];
+      }
 
-      if (!matchingFile) {
-        setRecipients(prev => prev.map((r, idx) => idx === i ? { ...r, status: 'error', error: 'File tidak ditemukan' } : r));
+      if (matchingFiles.length === 0) {
+        setBulkStatus(prev => ({ 
+          ...prev, 
+          [recipient.email]: { status: 'error', error: useCommonFile ? 'Pilih lampiran' : 'File tidak ditemukan' } 
+        }));
         continue;
       }
 
@@ -375,7 +412,7 @@ export default function App() {
       formData.append('to', recipient.email);
       formData.append('subject', subject);
       formData.append('body', body);
-      formData.append('attachments', matchingFile);
+      matchingFiles.forEach(file => formData.append('attachments', file));
 
       try {
         const response = await fetch('/api/send-email', {
@@ -385,12 +422,12 @@ export default function App() {
         const data = await response.json();
         
         if (response.ok) {
-          setRecipients(prev => prev.map((r, idx) => idx === i ? { ...r, status: 'success' } : r));
+          setBulkStatus(prev => ({ ...prev, [recipient.email]: { status: 'success' } }));
         } else {
-          setRecipients(prev => prev.map((r, idx) => idx === i ? { ...r, status: 'error', error: data.error || 'Gagal kirim' } : r));
+          setBulkStatus(prev => ({ ...prev, [recipient.email]: { status: 'error', error: data.error || 'Gagal kirim' } }));
         }
       } catch (error: any) {
-        setRecipients(prev => prev.map((r, idx) => idx === i ? { ...r, status: 'error', error: error.message } : r));
+        setBulkStatus(prev => ({ ...prev, [recipient.email]: { status: 'error', error: error.message } }));
       }
 
       // Small delay between emails
@@ -401,22 +438,36 @@ export default function App() {
   };
 
   const downloadCsvTemplate = () => {
-    const csvContent = "email,filename\nkaryawan1@example.com,slip_januari_001.pdf\nkaryawan2@example.com,slip_januari_002.pdf";
+    const csvContent = useCommonFile 
+      ? "email\nkaryawan1@example.com\nkaryawan2@example.com"
+      : "email,filename\nkaryawan1@example.com,slip_januari_001.pdf\nkaryawan2@example.com,slip_januari_002.pdf";
     const blob = new Blob([csvContent], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'template_kopsyah.csv';
+    a.download = useCommonFile ? 'template_email_list.csv' : 'template_kopsyah_bulk.csv';
     a.click();
   };
 
+  // Cleanup object URLs for previews on unmount
+  useEffect(() => {
+    return () => {
+      files.forEach(file => {
+        if (file.preview) URL.revokeObjectURL(file.preview);
+      });
+      bulkFiles.forEach(file => {
+        if (file.preview) URL.revokeObjectURL(file.preview);
+      });
+    };
+  }, []); // Only on unmount
+
   const stats = useMemo(() => {
     const total = recipients.length;
-    const success = recipients.filter(r => r.status === 'success').length;
-    const error = recipients.filter(r => r.status === 'error').length;
-    const pending = recipients.filter(r => r.status === 'pending').length;
+    const success = recipients.filter(r => bulkStatus[r.email]?.status === 'success').length;
+    const error = recipients.filter(r => bulkStatus[r.email]?.status === 'error').length;
+    const pending = recipients.filter(r => !bulkStatus[r.email] || bulkStatus[r.email].status === 'pending').length;
     return { total, success, error, pending };
-  }, [recipients]);
+  }, [recipients, bulkStatus]);
 
   return (
     <div className="min-h-screen bg-[#F8F9FA] font-sans text-slate-900">
@@ -726,7 +777,7 @@ export default function App() {
                         </div>
 
                         <div className="space-y-2">
-                          <label className="block text-sm font-semibold text-slate-700">Lampiran PDF</label>
+                          <label className="block text-sm font-semibold text-slate-700">Lampiran (PDF/Gambar)</label>
                           <div
                             {...getRootPropsSingle()}
                             className={cn(
@@ -738,7 +789,7 @@ export default function App() {
                             <div className="bg-white p-3 rounded-full shadow-sm border border-slate-100">
                               <Paperclip className={cn("w-6 h-6", isDragActiveSingle ? "text-emerald-600" : "text-slate-400")} />
                             </div>
-                            <p className="text-sm font-semibold text-slate-700">Klik atau seret file PDF</p>
+                            <p className="text-sm font-semibold text-slate-700">Klik atau seret file PDF atau Gambar</p>
                           </div>
                         </div>
 
@@ -764,13 +815,46 @@ export default function App() {
                     >
                       {/* Bulk Controls */}
                       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+                        {/* Common File Toggle */}
+                        <div className="mb-6 p-4 bg-emerald-50/50 rounded-xl border border-emerald-100 flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className={cn(
+                              "p-2 rounded-lg",
+                              useCommonFile ? "bg-emerald-600 text-white" : "bg-white text-slate-400 border border-slate-200"
+                            )}>
+                              <FileText className="w-4 h-4" />
+                            </div>
+                            <div>
+                              <p className="text-sm font-bold text-slate-800">Gunakan Satu File Lampiran</p>
+                              <p className="text-[10px] text-slate-500">Kirim file yang sama ke semua penerima di daftar CSV</p>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => {
+                              setUseCommonFile(!useCommonFile);
+                              setBulkFiles([]); // Clear files when switching mode to avoid confusion
+                            }}
+                            className={cn(
+                              "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none",
+                              useCommonFile ? "bg-emerald-600" : "bg-slate-200"
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                                useCommonFile ? "translate-x-6" : "translate-x-1"
+                              )}
+                            />
+                          </button>
+                        </div>
+
                         <div className="grid grid-cols-2 gap-4">
                           <div className="space-y-2">
                             <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider">1. Import Daftar (CSV)</label>
                             <div className="flex gap-2">
                               <label className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl cursor-pointer transition-all text-sm font-bold border border-slate-200">
                                 <Upload className="w-4 h-4" />
-                                Upload CSV
+                                {useCommonFile ? 'Upload List Email' : 'Upload CSV'}
                                 <input type="file" accept=".csv" onChange={handleCsvUpload} className="hidden" />
                               </label>
                               <button 
@@ -783,11 +867,13 @@ export default function App() {
                             </div>
                           </div>
                           <div className="space-y-2">
-                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider">2. Upload Semua PDF</label>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider">
+                              {useCommonFile ? '2. Upload Lampiran (Bisa Banyak)' : '2. Upload Semua File'}
+                            </label>
                             <div {...getRootPropsBulkFiles()} className="flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl cursor-pointer transition-all text-sm font-bold border border-slate-200">
                               <input {...getInputPropsBulkFiles()} />
                               <Paperclip className="w-4 h-4" />
-                              Pilih PDF
+                              {useCommonFile ? 'Pilih Lampiran' : 'Pilih Banyak File'}
                             </div>
                           </div>
                         </div>
@@ -817,10 +903,12 @@ export default function App() {
                             </button>
                             <button 
                               onClick={handleSendBulk}
-                              disabled={isBulkSending}
+                              disabled={isBulkSending || recipients.length === 0 || bulkFiles.length === 0}
                               className={cn(
                                 "px-6 py-2.5 rounded-xl font-bold text-white shadow-lg transition-all flex items-center gap-2",
-                                isBulkSending ? "bg-slate-300 cursor-not-allowed" : "bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20"
+                                (isBulkSending || recipients.length === 0 || bulkFiles.length === 0) 
+                                  ? "bg-slate-300 cursor-not-allowed shadow-none" 
+                                  : "bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20"
                               )}
                             >
                               {isBulkSending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
@@ -853,31 +941,34 @@ export default function App() {
                                   </td>
                                 </tr>
                               ) : (
-                                recipients.map((r, idx) => (
-                                  <tr key={`${r.email}-${idx}`} className="hover:bg-slate-50 transition-colors">
-                                    <td className="px-6 py-3">
-                                      <p className="text-xs font-bold text-slate-700">{r.email}</p>
-                                    </td>
-                                    <td className="px-6 py-3">
-                                      <p className="text-[10px] text-slate-500 font-mono">{r.filename}</p>
-                                    </td>
-                                    <td className="px-6 py-3">
-                                      <div className="flex justify-center">
-                                        {r.status === 'pending' && <div className="w-2 h-2 rounded-full bg-slate-200" />}
-                                        {r.status === 'sending' && <Loader2 className="w-4 h-4 text-emerald-500 animate-spin" />}
-                                        {r.status === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-500" />}
-                                        {r.status === 'error' && (
-                                          <div className="group relative">
-                                            <AlertCircle className="w-4 h-4 text-red-500 cursor-help" />
-                                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-slate-800 text-white text-[10px] rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-20">
-                                              {r.error}
+                                recipients.map((r, idx) => {
+                                  const s = bulkStatus[r.email] || { status: 'pending' };
+                                  return (
+                                    <tr key={`${r.email}-${idx}`} className="hover:bg-slate-50 transition-colors">
+                                      <td className="px-6 py-3">
+                                        <p className="text-xs font-bold text-slate-700">{r.email}</p>
+                                      </td>
+                                      <td className="px-6 py-3">
+                                        <p className="text-[10px] text-slate-500 font-mono">{useCommonFile ? '-' : r.filename}</p>
+                                      </td>
+                                      <td className="px-6 py-3">
+                                        <div className="flex justify-center">
+                                          {s.status === 'pending' && <div className="w-2 h-2 rounded-full bg-slate-200" />}
+                                          {s.status === 'sending' && <Loader2 className="w-4 h-4 text-emerald-500 animate-spin" />}
+                                          {s.status === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-500" />}
+                                          {s.status === 'error' && (
+                                            <div className="group relative">
+                                              <AlertCircle className="w-4 h-4 text-red-500 cursor-help" />
+                                              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-slate-800 text-white text-[10px] rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-20">
+                                                {s.error}
+                                              </div>
                                             </div>
-                                          </div>
-                                        )}
-                                      </div>
-                                    </td>
-                                  </tr>
-                                ))
+                                          )}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  );
+                                })
                               )}
                             </tbody>
                           </table>
@@ -925,9 +1016,15 @@ export default function App() {
                           className="group flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100 hover:border-emerald-200 transition-all"
                         >
                           <div className="flex items-center gap-3 min-w-0">
-                            <div className="bg-red-50 p-2 rounded-lg border border-red-100">
-                              <FileText className="w-4 h-4 text-red-500" />
-                            </div>
+                            {file.preview ? (
+                              <div className="w-8 h-8 rounded-lg border border-slate-200 overflow-hidden shrink-0">
+                                <img src={file.preview} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                              </div>
+                            ) : (
+                              <div className="bg-red-50 p-2 rounded-lg border border-red-100 shrink-0">
+                                <FileText className="w-4 h-4 text-red-500" />
+                              </div>
+                            )}
                             <div className="min-w-0">
                               <p className="text-xs font-bold text-slate-700 truncate">{file.name}</p>
                               <p className="text-[10px] text-slate-400">{(file.size / 1024).toFixed(1)} KB</p>
@@ -959,13 +1056,15 @@ export default function App() {
                   <div className="space-y-2">
                     <p className="text-[11px] font-bold text-emerald-400 uppercase">Format CSV</p>
                     <p className="text-[10px] text-emerald-100/70 leading-relaxed">
-                      File CSV harus memiliki kolom <code className="bg-emerald-800 px-1 rounded">email</code> dan <code className="bg-emerald-800 px-1 rounded">filename</code>.
+                      File CSV harus memiliki kolom <code className="bg-emerald-800 px-1 rounded">email</code>{useCommonFile ? '' : <> dan <code className="bg-emerald-800 px-1 rounded">filename</code></>}.
                     </p>
                   </div>
                   <div className="space-y-2">
-                    <p className="text-[11px] font-bold text-emerald-400 uppercase">Pencocokan File</p>
+                    <p className="text-[11px] font-bold text-emerald-400 uppercase">{useCommonFile ? 'Lampiran Massal' : 'Pencocokan File'}</p>
                     <p className="text-[10px] text-emerald-100/70 leading-relaxed">
-                      Sistem akan mencocokkan nama file di CSV dengan file PDF yang Anda upload. Pastikan nama file persis sama.
+                      {useCommonFile 
+                        ? 'Satu atau beberapa file (PDF/Gambar) yang diupload akan dikirimkan ke semua alamat email yang ada dalam daftar CSV.'
+                        : 'Sistem akan mencocokkan nama file di CSV dengan file PDF atau Gambar yang Anda upload. Pastikan nama file persis sama.'}
                     </p>
                   </div>
                   <div className="pt-2 border-t border-emerald-800">
