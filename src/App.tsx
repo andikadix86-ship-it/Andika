@@ -18,7 +18,8 @@ import {
   Trash2,
   Play,
   BarChart3,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Video
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -250,7 +251,11 @@ export default function App() {
       'application/pdf': ['.pdf'],
       'image/jpeg': ['.jpg', '.jpeg'],
       'image/png': ['.png'],
-      'image/webp': ['.webp']
+      'image/webp': ['.webp'],
+      'video/mp4': ['.mp4'],
+      'video/mpeg': ['.mpeg'],
+      'video/quicktime': ['.mov'],
+      'video/x-msvideo': ['.avi']
     },
     multiple: true
   } as any);
@@ -269,7 +274,11 @@ export default function App() {
       'application/pdf': ['.pdf'],
       'image/jpeg': ['.jpg', '.jpeg'],
       'image/png': ['.png'],
-      'image/webp': ['.webp']
+      'image/webp': ['.webp'],
+      'video/mp4': ['.mp4'],
+      'video/mpeg': ['.mpeg'],
+      'video/quicktime': ['.mov'],
+      'video/x-msvideo': ['.avi']
     },
     multiple: true
   } as any);
@@ -612,6 +621,69 @@ export default function App() {
                       </div>
                     </div>
 
+                    {/* Global Summary Stats */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+                      <div className="bg-emerald-600 rounded-2xl p-6 text-white shadow-xl shadow-emerald-600/20 relative overflow-hidden group">
+                        <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:scale-110 transition-transform">
+                          <Send className="w-20 h-20" />
+                        </div>
+                        <div className="relative z-10">
+                          <p className="text-[10px] font-bold text-emerald-200 uppercase tracking-[0.2em] mb-1">Total Eksekusi (All Time)</p>
+                          <div className="flex items-baseline gap-2">
+                            <p className="text-4xl font-black leading-none">{reports.length}</p>
+                            <p className="text-xs font-bold text-emerald-200 uppercase">Email</p>
+                          </div>
+                          <div className="mt-6 flex items-center gap-4 bg-emerald-700/30 p-3 rounded-xl backdrop-blur-sm border border-emerald-500/20">
+                            <div className="flex-1">
+                              <p className="text-[9px] font-bold text-emerald-300 uppercase mb-0.5">Sukses</p>
+                              <p className="text-sm font-bold">{reports.filter(r => r.status === 'success').length}</p>
+                            </div>
+                            <div className="w-px h-6 bg-emerald-500/30" />
+                            <div className="flex-1 text-right">
+                              <p className="text-[9px] font-bold text-emerald-300 uppercase mb-0.5">Gagal</p>
+                              <p className="text-sm font-bold">{reports.filter(r => r.status === 'error').length}</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm relative group">
+                        <div className="absolute top-0 right-0 p-4">
+                          <Loader2 className={cn("w-12 h-12 text-slate-100 transition-colors duration-500", stats.pending > 0 && "animate-spin text-emerald-100")} />
+                        </div>
+                        <div className="relative z-10">
+                          <div className="flex items-center gap-2 mb-1">
+                            <div className={cn("w-1.5 h-1.5 rounded-full", stats.pending > 0 ? "bg-emerald-500 animate-pulse" : "bg-slate-300")} />
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Antrean Aktif (Bulk)</p>
+                          </div>
+                          <div className="flex items-baseline gap-2">
+                            <p className={cn("text-4xl font-black leading-none", stats.pending > 0 ? "text-emerald-600" : "text-slate-800")}>
+                              {stats.pending}
+                            </p>
+                            <p className="text-xs font-bold text-slate-400 uppercase">Penerima</p>
+                          </div>
+                          <div className="mt-6">
+                            <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                              <div 
+                                className="bg-emerald-500 h-full transition-all duration-1000 ease-out" 
+                                style={{ width: stats.total > 0 ? `${(stats.success / stats.total) * 100}%` : '0%' }}
+                              />
+                            </div>
+                            <div className="flex justify-between mt-2">
+                              <p className="text-[10px] font-medium text-slate-500 italic">
+                                {stats.pending > 0 ? 'Proses bulk sedang berjalan...' : 'Tidak ada antrean pengiriman aktif'}
+                              </p>
+                              {stats.total > 0 && (
+                                <p className="text-[10px] font-bold text-emerald-600 uppercase">
+                                  {Math.round((stats.success / stats.total) * 100)}% Selesai
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
                     {/* Filter Bar */}
                     <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6 p-4 bg-slate-50 rounded-2xl border border-slate-100">
                       <div>
@@ -811,7 +883,7 @@ export default function App() {
                         </div>
 
                         <div className="space-y-2">
-                          <label className="block text-sm font-semibold text-slate-700">Lampiran (PDF/Gambar)</label>
+                          <label className="block text-sm font-semibold text-slate-700">Lampiran (PDF/Gambar/Video)</label>
                           <div
                             {...getRootPropsSingle()}
                             className={cn(
@@ -823,7 +895,7 @@ export default function App() {
                             <div className="bg-white p-3 rounded-full shadow-sm border border-slate-100">
                               <Paperclip className={cn("w-6 h-6", isDragActiveSingle ? "text-emerald-600" : "text-slate-400")} />
                             </div>
-                            <p className="text-sm font-semibold text-slate-700">Klik atau seret file PDF atau Gambar</p>
+                            <p className="text-sm font-semibold text-slate-700">Klik atau seret file PDF, Gambar, atau Video</p>
                           </div>
                         </div>
 
@@ -1115,6 +1187,10 @@ export default function App() {
                               <div className="w-8 h-8 rounded-lg border border-slate-200 overflow-hidden shrink-0">
                                 <img src={file.preview} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                               </div>
+                            ) : file.type.startsWith('video/') ? (
+                              <div className="bg-emerald-50 p-2 rounded-lg border border-emerald-100 shrink-0">
+                                <Video className="w-4 h-4 text-emerald-500" />
+                              </div>
                             ) : (
                               <div className="bg-red-50 p-2 rounded-lg border border-red-100 shrink-0">
                                 <FileText className="w-4 h-4 text-red-500" />
@@ -1158,8 +1234,8 @@ export default function App() {
                     <p className="text-[11px] font-bold text-emerald-400 uppercase">{useCommonFile ? 'Lampiran Massal' : 'Pencocokan File'}</p>
                     <p className="text-[10px] text-emerald-100/70 leading-relaxed">
                       {useCommonFile 
-                        ? 'Satu atau beberapa file (PDF/Gambar) yang diupload akan dikirimkan ke semua alamat email yang ada dalam daftar CSV.'
-                        : 'Sistem akan mencocokkan nama file di CSV dengan file PDF atau Gambar yang Anda upload. Pastikan nama file persis sama.'}
+                        ? 'Satu atau beberapa file (PDF/Gambar/Video) yang diupload akan dikirimkan ke semua alamat email yang ada dalam daftar CSV.'
+                        : 'Sistem akan mencocokkan nama file di CSV dengan file PDF, Gambar, atau Video yang Anda upload. Pastikan nama file persis sama.'}
                     </p>
                   </div>
                   <div className="pt-2 border-t border-emerald-800">
