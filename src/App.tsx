@@ -124,7 +124,7 @@ export default function App() {
 
     // 1. All Reports Data
     const allData = filteredReports.map(r => ({
-      'Tanggal': new Date(r.timestamp).toLocaleString('id-ID'),
+      'Tanggal': new Date(r.timestamp),
       'Penerima': r.recipient,
       'Subjek': r.subject,
       'Tipe': r.type === 'single' ? 'Satuan' : 'Bulk',
@@ -132,21 +132,26 @@ export default function App() {
       'Status': r.status === 'success' ? 'Terkirim' : 'Gagal',
       'Keterangan': r.error || '-'
     }));
-    const allSheet = XLSX.utils.json_to_sheet(allData);
+    const allSheet = XLSX.utils.json_to_sheet(allData, { cellDates: true });
+    
+    // Set column width and date format for 'Tanggal'
+    if (allSheet['!cols'] === undefined) allSheet['!cols'] = [];
+    allSheet['!cols'][0] = { wch: 20 };
+    
     XLSX.utils.book_append_sheet(wb, allSheet, "Semua Laporan");
 
     // 2. Success Reports Data
     const successReports = filteredReports.filter(r => r.status === 'success');
     if (successReports.length > 0) {
       const successData = successReports.map(r => ({
-        'Tanggal': new Date(r.timestamp).toLocaleString('id-ID'),
+        'Tanggal': new Date(r.timestamp),
         'Penerima': r.recipient,
         'Subjek': r.subject,
         'Tipe': r.type === 'single' ? 'Satuan' : 'Bulk',
         'File': r.filename || '-',
         'Status': 'Terkirim'
       }));
-      const successSheet = XLSX.utils.json_to_sheet(successData);
+      const successSheet = XLSX.utils.json_to_sheet(successData, { cellDates: true });
       XLSX.utils.book_append_sheet(wb, successSheet, "Email Berhasil");
     }
 
@@ -154,7 +159,7 @@ export default function App() {
     const errorReports = filteredReports.filter(r => r.status === 'error');
     if (errorReports.length > 0) {
       const errorData = errorReports.map(r => ({
-        'Tanggal': new Date(r.timestamp).toLocaleString('id-ID'),
+        'Tanggal': new Date(r.timestamp),
         'Penerima': r.recipient,
         'Subjek': r.subject,
         'Tipe': r.type === 'single' ? 'Satuan' : 'Bulk',
@@ -162,7 +167,7 @@ export default function App() {
         'Status': 'Gagal',
         'Keterangan': r.error || '-'
       }));
-      const errorSheet = XLSX.utils.json_to_sheet(errorData);
+      const errorSheet = XLSX.utils.json_to_sheet(errorData, { cellDates: true });
       XLSX.utils.book_append_sheet(wb, errorSheet, "Email Gagal");
     }
 
@@ -223,7 +228,7 @@ export default function App() {
   const [bulkFiles, setBulkFiles] = useState<FileWithPreview[]>([]);
   const [isBulkSending, setIsBulkSending] = useState(false);
   const [useCommonFile, setUseCommonFile] = useState(false);
-  const [bulkStatus, setBulkStatus] = useState<Record<string, { status: Recipient['status'], error?: string }>>({});
+  const [bulkStatus, setBulkStatus] = useState<Record<string, { status: Recipient['status'], error?: string, matchedFile?: string }>>({});
   const [sendDelay, setSendDelay] = useState(2); // delay in seconds
   const [useJitter, setUseJitter] = useState(true);
 
@@ -347,6 +352,7 @@ export default function App() {
     formData.append('to', to);
     formData.append('subject', subject);
     formData.append('body', body);
+    formData.append('type', 'single');
     files.forEach(file => formData.append('attachments', file));
 
       try {
@@ -369,6 +375,8 @@ export default function App() {
       }
   };
 
+  const [currentRecipient, setCurrentRecipient] = useState<string | null>(null);
+
   const handleSendBulk = async () => {
     if (recipients.length === 0) {
       alert('Mohon import daftar penerima (CSV) terlebih dahulu.');
@@ -378,6 +386,42 @@ export default function App() {
       alert('Mohon upload file PDF yang akan dikirim.');
       return;
     }
+
+    // Helper to clean file names for fuzzy matching
+    const cleanFileName = (name: string) => {
+      return name
+        .toLowerCase()
+        .replace(/\.[^/.]+$/, "") // remove extension
+        .replace(/[_\-\.]/g, " ") // replace separators with space
+        .replace(/\s+/g, " ")      // collapse multiple spaces
+        .trim();
+    };
+
+    const findBestFileMatch = (target: string, available: File[]) => {
+      if (!target) return null;
+      const targetClean = cleanFileName(target);
+      const targetLower = target.toLowerCase();
+
+      // Priority 1: Exact Match (case insensitive)
+      let match = available.find(f => f.name.toLowerCase() === targetLower);
+      if (match) return match;
+
+      // Priority 2: Base Name Match (ignoring extension)
+      match = available.find(f => f.name.toLowerCase().replace(/\.[^/.]+$/, "") === targetClean);
+      if (match) return match;
+
+      // Priority 3: Normalized separators and spaces
+      match = available.find(f => cleanFileName(f.name) === targetClean);
+      if (match) return match;
+
+      // Priority 4: Partial containment (one is inside another)
+      match = available.find(f => {
+        const fileClean = cleanFileName(f.name);
+        return (fileClean.length > 3 && targetClean.includes(fileClean)) || 
+               (targetClean.length > 3 && fileClean.includes(targetClean));
+      });
+      return match || null;
+    };
 
     // Hitung ringkasan status saat ini
     const totalCount = recipients.length;
@@ -423,22 +467,21 @@ export default function App() {
       // Skip if already success
       if (bulkStatus[recipient.email]?.status === 'success') continue;
 
+      setCurrentRecipient(recipient.email);
       setBulkStatus(prev => ({ ...prev, [recipient.email]: { status: 'sending' } }));
 
       let matchingFiles: File[] = [];
+      let matchedName = '';
+      
       if (useCommonFile) {
         matchingFiles = bulkFiles;
+        matchedName = bulkFiles.map(f => f.name).join(', ');
       } else {
-        const matchingFile = bulkFiles.find(f => {
-          const fileName = f.name.toLowerCase();
-          const targetName = recipient.filename.toLowerCase();
-          // Support various extensions or exact match
-          const baseFileName = fileName.replace(/\.[^/.]+$/, "");
-          const targetBaseName = targetName.replace(/\.[^/.]+$/, "");
-          
-          return fileName === targetName || baseFileName === targetName || baseFileName === targetBaseName;
-        });
-        if (matchingFile) matchingFiles = [matchingFile];
+        const match = findBestFileMatch(recipient.filename, bulkFiles);
+        if (match) {
+          matchingFiles = [match];
+          matchedName = match.name;
+        }
       }
 
       if (matchingFiles.length === 0) {
@@ -453,6 +496,7 @@ export default function App() {
       formData.append('to', recipient.email);
       formData.append('subject', subject);
       formData.append('body', body);
+      formData.append('type', 'bulk');
       matchingFiles.forEach(file => formData.append('attachments', file));
 
       try {
@@ -463,12 +507,12 @@ export default function App() {
         const data = await response.json();
         
         if (response.ok) {
-          setBulkStatus(prev => ({ ...prev, [recipient.email]: { status: 'success' } }));
+          setBulkStatus(prev => ({ ...prev, [recipient.email]: { status: 'success', matchedFile: matchedName } }));
         } else {
-          setBulkStatus(prev => ({ ...prev, [recipient.email]: { status: 'error', error: data.error || 'Gagal kirim' } }));
+          setBulkStatus(prev => ({ ...prev, [recipient.email]: { status: 'error', error: data.error || 'Gagal kirim', matchedFile: matchedName } }));
         }
       } catch (error: any) {
-        setBulkStatus(prev => ({ ...prev, [recipient.email]: { status: 'error', error: error.message } }));
+        setBulkStatus(prev => ({ ...prev, [recipient.email]: { status: 'error', error: error.message, matchedFile: matchedName } }));
       }
 
       // Dynamic delay between emails to avoid spam filters
@@ -477,6 +521,7 @@ export default function App() {
       await new Promise(resolve => setTimeout(resolve, baseDelay + jitter));
     }
 
+    setCurrentRecipient(null);
     setIsBulkSending(false);
   };
 
@@ -1045,42 +1090,83 @@ export default function App() {
                           </div>
                         </div>
 
-                        <div className="mt-6 pt-6 border-t border-slate-100 flex items-center justify-between">
-                          <div className="flex gap-4">
-                            <div className="text-center">
-                              <p className="text-[10px] font-bold text-slate-400 uppercase">Total</p>
-                              <p className="text-lg font-bold text-slate-700">{stats.total}</p>
+                        <div className="mt-6 pt-6 border-t border-slate-100 space-y-6">
+                          {isBulkSending && (
+                            <div className="bg-emerald-50/50 p-5 rounded-2xl border border-emerald-200 shadow-sm">
+                              <div className="flex justify-between items-end mb-3">
+                                <div className="space-y-1">
+                                  <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest flex items-center gap-2">
+                                    <Loader2 className="w-3 h-3 animate-spin" /> Sedang Mengirim...
+                                  </p>
+                                  {currentRecipient && (
+                                    <p className="text-xs font-medium text-slate-600 italic truncate max-w-[300px]">
+                                      Memproses: <span className="font-bold text-slate-800">{currentRecipient}</span>
+                                    </p>
+                                  )}
+                                </div>
+                                <div className="text-right">
+                                  <p className="text-[10px] font-black text-emerald-600 tracking-tighter">
+                                    {stats.success + stats.error} / {stats.total} Selesai
+                                  </p>
+                                  <p className="text-[10px] font-bold text-slate-400 uppercase">
+                                    {Math.round(((stats.success + stats.error) / stats.total) * 100)}%
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="w-full bg-slate-100 h-3 rounded-full overflow-hidden border border-slate-200/50 p-0.5">
+                                <motion.div 
+                                  initial={{ width: 0 }}
+                                  animate={{ width: stats.total > 0 ? `${((stats.success + stats.error) / stats.total) * 100}%` : '0%' }}
+                                  className="h-full bg-gradient-to-r from-emerald-500 to-emerald-400 rounded-full shadow-[0_0_15px_rgba(16,185,129,0.3)] relative overflow-hidden"
+                                  transition={{ type: "spring", bounce: 0, duration: 0.8 }}
+                                >
+                                  <motion.div 
+                                    animate={{ x: ['-100%', '100%'] }}
+                                    transition={{ repeat: Infinity, duration: 1.5, ease: "linear" }}
+                                    className="absolute inset-0 bg-white/30 skew-x-[-20deg]"
+                                  />
+                                </motion.div>
+                              </div>
                             </div>
-                            <div className="text-center">
-                              <p className="text-[10px] font-bold text-emerald-500 uppercase">Sukses</p>
-                              <p className="text-lg font-bold text-emerald-600">{stats.success}</p>
+                          )}
+
+                          <div className="flex items-center justify-between">
+                            <div className="flex gap-4">
+                              <div className="text-center">
+                                <p className="text-[10px] font-bold text-slate-400 uppercase">Total</p>
+                                <p className="text-lg font-bold text-slate-700">{stats.total}</p>
+                              </div>
+                              <div className="text-center">
+                                <p className="text-[10px] font-bold text-emerald-500 uppercase">Sukses</p>
+                                <p className="text-lg font-bold text-emerald-600">{stats.success}</p>
+                              </div>
+                              <div className="text-center">
+                                <p className="text-[10px] font-bold text-red-400 uppercase">Gagal</p>
+                                <p className="text-lg font-bold text-red-600">{stats.error}</p>
+                              </div>
                             </div>
-                            <div className="text-center">
-                              <p className="text-[10px] font-bold text-red-400 uppercase">Gagal</p>
-                              <p className="text-lg font-bold text-red-600">{stats.error}</p>
+                            
+                            <div className="flex gap-2">
+                              <button 
+                                onClick={clearBulk}
+                                className="px-4 py-2.5 text-slate-400 hover:text-red-500 font-bold text-sm transition-all"
+                              >
+                                Reset
+                              </button>
+                              <button 
+                                onClick={handleSendBulk}
+                                disabled={isBulkSending || recipients.length === 0 || bulkFiles.length === 0}
+                                className={cn(
+                                  "px-6 py-2.5 rounded-xl font-bold text-white shadow-lg transition-all flex items-center gap-2",
+                                  (isBulkSending || recipients.length === 0 || bulkFiles.length === 0) 
+                                    ? "bg-slate-300 cursor-not-allowed shadow-none" 
+                                    : "bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20"
+                                )}
+                              >
+                                {isBulkSending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                                {isBulkSending ? 'Mengirim...' : 'Mulai Kirim'}
+                              </button>
                             </div>
-                          </div>
-                          
-                          <div className="flex gap-2">
-                            <button 
-                              onClick={clearBulk}
-                              className="px-4 py-2.5 text-slate-400 hover:text-red-500 font-bold text-sm transition-all"
-                            >
-                              Reset
-                            </button>
-                            <button 
-                              onClick={handleSendBulk}
-                              disabled={isBulkSending || recipients.length === 0 || bulkFiles.length === 0}
-                              className={cn(
-                                "px-6 py-2.5 rounded-xl font-bold text-white shadow-lg transition-all flex items-center gap-2",
-                                (isBulkSending || recipients.length === 0 || bulkFiles.length === 0) 
-                                  ? "bg-slate-300 cursor-not-allowed shadow-none" 
-                                  : "bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20"
-                              )}
-                            >
-                              {isBulkSending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                              Mulai Kirim
-                            </button>
                           </div>
                         </div>
                       </div>
@@ -1116,7 +1202,17 @@ export default function App() {
                                         <p className="text-xs font-bold text-slate-700">{r.email}</p>
                                       </td>
                                       <td className="px-6 py-3">
-                                        <p className="text-[10px] text-slate-500 font-mono">{useCommonFile ? '-' : r.filename}</p>
+                                        <div className="flex flex-col gap-1">
+                                          <p className="text-[10px] text-slate-400 font-mono italic">Target: {useCommonFile ? 'Common' : r.filename}</p>
+                                          {s.matchedFile && s.matchedFile !== r.filename && (
+                                            <p className="text-[10px] text-emerald-600 font-bold bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100 flex items-center gap-1 w-fit">
+                                              <CheckCircle2 className="w-3 h-3" /> Matched: {s.matchedFile}
+                                            </p>
+                                          )}
+                                          {s.matchedFile && s.matchedFile === r.filename && (
+                                            <p className="text-[10px] text-slate-500 font-medium">File: {s.matchedFile}</p>
+                                          )}
+                                        </div>
                                       </td>
                                       <td className="px-6 py-3">
                                         <div className="flex justify-center">
@@ -1284,6 +1380,38 @@ export default function App() {
               <button onClick={() => setStatus({ type: null, message: '' })} className="ml-2 p-1 hover:bg-slate-100 rounded-full">
                 <X className="w-4 h-4" />
               </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Sticky Bulk Progress Bar */}
+      <AnimatePresence>
+        {isBulkSending && (
+          <motion.div
+            initial={{ y: -100 }}
+            animate={{ y: 0 }}
+            exit={{ y: -100 }}
+            className="fixed top-20 left-1/2 -translate-x-1/2 z-50 w-full max-w-xl px-6"
+          >
+            <div className="bg-white/90 backdrop-blur-md rounded-2xl shadow-2xl border border-emerald-100 p-4 shadow-emerald-600/10">
+              <div className="flex justify-between items-center mb-2">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                  <p className="text-[10px] font-black text-emerald-600 uppercase tracking-widest">Kirim Massal Aktif</p>
+                </div>
+                <p className="text-[10px] font-bold text-slate-500">
+                  {stats.success + stats.error} dari {stats.total}
+                </p>
+              </div>
+              <div className="w-full bg-slate-200/50 h-1.5 rounded-full overflow-hidden">
+                <motion.div 
+                  initial={{ width: 0 }}
+                  animate={{ width: stats.total > 0 ? `${((stats.success + stats.error) / stats.total) * 100}%` : '0%' }}
+                  className="h-full bg-emerald-500"
+                  transition={{ type: "spring", bounce: 0, duration: 0.5 }}
+                />
+              </div>
             </div>
           </motion.div>
         )}

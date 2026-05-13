@@ -102,12 +102,14 @@ async function startServer() {
 
   // API Route to send email
   app.post("/api/send-email", upload.array("attachments"), async (req, res) => {
-    const { to, subject, body } = req.body;
+    const { to, subject, body, type } = req.body;
     const files = req.files as Express.Multer.File[];
 
     if (!to || !subject || !body) {
       return res.status(400).json({ error: "Missing required fields" });
     }
+
+    const reportType = type || (files.length > 1 ? 'bulk' : 'single');
 
     try {
       const mailOptions = {
@@ -125,9 +127,9 @@ async function startServer() {
       
       // Log success to DB with SMTP response info
       db.prepare(`
-        INSERT INTO email_reports (recipient, subject, status, type, filename)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(to, subject, 'success', files.length > 1 ? 'bulk' : 'single', files.map(f => f.originalname).join(', '));
+        INSERT INTO email_reports (recipient, subject, status, type, filename, timestamp)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+      `).run(to, subject, 'success', reportType, files.map(f => f.originalname).join(', '));
 
       res.json({ success: true, message: `Email sent to ${to}`, info: info.response });
     } catch (error: any) {
@@ -140,9 +142,9 @@ async function startServer() {
       }
       
       db.prepare(`
-        INSERT INTO email_reports (recipient, subject, status, error, type, filename)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(to, subject, 'error', errorMsg, files.length > 1 ? 'bulk' : 'single', files.map(f => f.originalname).join(', '));
+        INSERT INTO email_reports (recipient, subject, status, error, type, filename, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+      `).run(to, subject, 'error', errorMsg, reportType, files.map(f => f.originalname).join(', '));
 
       res.status(500).json({ error: errorMsg });
     }
