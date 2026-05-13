@@ -24,6 +24,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import Papa from 'papaparse';
+import * as XLSX from 'xlsx';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -114,10 +115,14 @@ export default function App() {
     }
   }, [activeTab]);
 
-  const exportToCSV = () => {
+  const exportToExcel = () => {
     if (filteredReports.length === 0) return;
 
-    const exportData = filteredReports.map(r => ({
+    // Create a new workbook
+    const wb = XLSX.utils.book_new();
+
+    // 1. All Reports Data
+    const allData = filteredReports.map(r => ({
       'Tanggal': new Date(r.timestamp).toLocaleString('id-ID'),
       'Penerima': r.recipient,
       'Subjek': r.subject,
@@ -126,17 +131,42 @@ export default function App() {
       'Status': r.status === 'success' ? 'Terkirim' : 'Gagal',
       'Keterangan': r.error || '-'
     }));
+    const allSheet = XLSX.utils.json_to_sheet(allData);
+    XLSX.utils.book_append_sheet(wb, allSheet, "Semua Laporan");
 
-    const csv = Papa.unparse(exportData);
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement("a");
-    const url = URL.createObjectURL(blob);
-    link.setAttribute("href", url);
-    link.setAttribute("download", `Report_Email_KOPSYAH_${new Date().toISOString().split('T')[0]}.csv`);
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    // 2. Success Reports Data
+    const successReports = filteredReports.filter(r => r.status === 'success');
+    if (successReports.length > 0) {
+      const successData = successReports.map(r => ({
+        'Tanggal': new Date(r.timestamp).toLocaleString('id-ID'),
+        'Penerima': r.recipient,
+        'Subjek': r.subject,
+        'Tipe': r.type === 'single' ? 'Satuan' : 'Bulk',
+        'File': r.filename || '-',
+        'Status': 'Terkirim'
+      }));
+      const successSheet = XLSX.utils.json_to_sheet(successData);
+      XLSX.utils.book_append_sheet(wb, successSheet, "Email Berhasil");
+    }
+
+    // 3. Error Reports Data
+    const errorReports = filteredReports.filter(r => r.status === 'error');
+    if (errorReports.length > 0) {
+      const errorData = errorReports.map(r => ({
+        'Tanggal': new Date(r.timestamp).toLocaleString('id-ID'),
+        'Penerima': r.recipient,
+        'Subjek': r.subject,
+        'Tipe': r.type === 'single' ? 'Satuan' : 'Bulk',
+        'File': r.filename || '-',
+        'Status': 'Gagal',
+        'Keterangan': r.error || '-'
+      }));
+      const errorSheet = XLSX.utils.json_to_sheet(errorData);
+      XLSX.utils.book_append_sheet(wb, errorSheet, "Email Gagal");
+    }
+
+    // Generate Excel file and trigger download
+    XLSX.writeFile(wb, `Report_Email_KOPSYAH_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
   const retrySingleEmail = async (id: number) => {
@@ -193,6 +223,8 @@ export default function App() {
   const [isBulkSending, setIsBulkSending] = useState(false);
   const [useCommonFile, setUseCommonFile] = useState(false);
   const [bulkStatus, setBulkStatus] = useState<Record<string, { status: Recipient['status'], error?: string }>>({});
+  const [sendDelay, setSendDelay] = useState(2); // delay in seconds
+  const [useJitter, setUseJitter] = useState(true);
 
   const recipients = useMemo(() => {
     return rawRecipients
@@ -430,8 +462,10 @@ export default function App() {
         setBulkStatus(prev => ({ ...prev, [recipient.email]: { status: 'error', error: error.message } }));
       }
 
-      // Small delay between emails
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Dynamic delay between emails to avoid spam filters
+      const baseDelay = sendDelay * 1000;
+      const jitter = useJitter ? Math.random() * 1000 : 0; // Add up to 1 second of random jitter
+      await new Promise(resolve => setTimeout(resolve, baseDelay + jitter));
     }
 
     setIsBulkSending(false);
@@ -568,12 +602,12 @@ export default function App() {
                           </button>
                         )}
                         <button 
-                          onClick={exportToCSV}
+                          onClick={exportToExcel}
                           disabled={filteredReports.length === 0}
                           className="flex items-center gap-2 px-4 py-2 bg-emerald-50 text-emerald-700 rounded-xl hover:bg-emerald-100 transition-all text-sm font-bold border border-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           <FileSpreadsheet className="w-4 h-4" />
-                          Ekspor CSV
+                          Ekspor Excel
                         </button>
                       </div>
                     </div>
@@ -875,6 +909,67 @@ export default function App() {
                               <Paperclip className="w-4 h-4" />
                               {useCommonFile ? 'Pilih Lampiran' : 'Pilih Banyak File'}
                             </div>
+                          </div>
+                        </div>
+
+                        {/* Anti-Spam Settings */}
+                        <div className="mt-6 p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                          <div className="flex items-center justify-between mb-4">
+                            <div className="flex items-center gap-2">
+                              <History className="w-4 h-4 text-emerald-600" />
+                              <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Jeda Pengiriman (Anti-Spam)</h3>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] font-bold text-slate-400 uppercase">Input Manual:</span>
+                              <input 
+                                type="number" 
+                                value={sendDelay}
+                                onChange={(e) => setSendDelay(Math.max(0.5, Number(e.target.value)))}
+                                className="w-12 px-2 py-1 text-[10px] font-bold bg-white border border-slate-200 rounded text-center"
+                              />
+                              <span className="text-[10px] font-bold text-slate-400 uppercase">Detik</span>
+                            </div>
+                          </div>
+                          
+                          <div className="space-y-4">
+                            <div className="flex items-center gap-4">
+                              <div className="flex-1">
+                                <input 
+                                  type="range" 
+                                  min="0.5" 
+                                  max="10" 
+                                  step="0.5" 
+                                  value={sendDelay}
+                                  onChange={(e) => setSendDelay(Number(e.target.value))}
+                                  className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                                />
+                                <div className="flex justify-between mt-1">
+                                  <span className="text-[9px] text-slate-400">0.5s</span>
+                                  <span className="text-[10px] font-bold text-emerald-600">{sendDelay} detik</span>
+                                  <span className="text-[9px] text-slate-400">10s</span>
+                                </div>
+                              </div>
+                              
+                              <div className="flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 rounded-xl">
+                                <label className="text-[10px] font-bold text-slate-500 uppercase cursor-pointer">Jitter</label>
+                                <button
+                                  onClick={() => setUseJitter(!useJitter)}
+                                  className={cn(
+                                    "relative inline-flex h-4 w-7 items-center rounded-full transition-colors",
+                                    useJitter ? "bg-emerald-600" : "bg-slate-200"
+                                  )}
+                                >
+                                  <span className={cn(
+                                    "inline-block h-2 w-2 transform rounded-full bg-white transition-transform",
+                                    useJitter ? "translate-x-4" : "translate-x-1"
+                                  )} />
+                                </button>
+                              </div>
+                            </div>
+                            
+                            <p className="text-[10px] text-slate-400 italic">
+                               * Rekomendasi: Gunakan jeda minimal 2-3 detik dengan fitur 'Jitter' aktif agar pola pengiriman tidak terdeteksi sebagai bot oleh server Gmail.
+                            </p>
                           </div>
                         </div>
 
